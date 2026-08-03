@@ -1,0 +1,16 @@
+[Unit]
+Description=Spacemit K1 MUSE Pi Pro Elder AI Button Launcher
+After=multi-user.target
+
+[Service]
+Type=simple
+User=hnu
+WorkingDirectory=/home/hnu/elder_ai
+EnvironmentFile=-/home/hnu/elder_ai/elder-ai.env
+Environment=PYTHONUNBUFFERED=1
+ExecStart=/home/hnu/elder_ai/venv/bin/python /home/hnu/elder_ai/k1_buttons.py
+Restart=on-failure
+RestartSec=2
+
+[Install]
+WantedBy=multi-user.target

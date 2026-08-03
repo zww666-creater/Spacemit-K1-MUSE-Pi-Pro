@@ -2,7 +2,7 @@
 # -*- coding: utf-8 -*-
 
 """
-K1 / Muse Pi Pro elder_ai 主程序
+Spacemit K1 MUSE Pi Pro elder_ai 主程序
 
 功能：
     按键 1 / GPIO71：进入 OCR 拍照识别模式
@@ -15,17 +15,26 @@ K1 / Muse Pi Pro elder_ai 主程序
 
 import os
 
-os.environ.setdefault("OMP_NUM_THREADS", "8")
-os.environ.setdefault("OPENBLAS_NUM_THREADS", "8")
+from runtime_utils import (
+    PredictionGate,
+    env_bool,
+    env_float,
+    env_int,
+    resolve_project_dir,
+    scores_to_probabilities,
+)
 
-import sys
-import time
+ORT_INTRA_OP_THREADS = env_int("ORT_INTRA_OP_THREADS", 8, minimum=1)
+os.environ.setdefault("OMP_NUM_THREADS", str(ORT_INTRA_OP_THREADS))
+os.environ.setdefault("OPENBLAS_NUM_THREADS", str(ORT_INTRA_OP_THREADS))
+
 import signal
 import shutil
 import subprocess
 import threading
-from pathlib import Path
+import time
 from datetime import datetime
+from pathlib import Path
 
 import cv2
 
@@ -82,16 +91,16 @@ from gpiozero.pins.lgpio import LGPIOFactory
 # 基础路径和配置
 # =========================
 
-BASE_DIR = Path("/home/hnu/elder_ai")
-MODEL_PATH = BASE_DIR / "models" / "wechat_page.onnx"
-TTS_CACHE = BASE_DIR / "tts_cache"
-OCR_CAPTURE_DIR = BASE_DIR / "ocr_captures"
+BASE_DIR = resolve_project_dir(__file__)
+MODEL_PATH = Path(os.environ.get("WECHAT_MODEL_PATH", BASE_DIR / "models" / "wechat_page.onnx"))
+TTS_CACHE = Path(os.environ.get("TTS_CACHE_DIR", BASE_DIR / "tts_cache"))
+OCR_CAPTURE_DIR = Path(os.environ.get("OCR_CAPTURE_DIR", BASE_DIR / "ocr_captures"))
 
 AUDIO_DEVICE = os.environ.get("AUDIO_DEVICE", "plughw:0,0")
 
-KEY_OCR_GPIO = 71
-KEY_WECHAT_GPIO = 72
-KEY_STOP_GPIO = 74
+KEY_OCR_GPIO = env_int("KEY_OCR_GPIO", 71, minimum=0)
+KEY_WECHAT_GPIO = env_int("KEY_WECHAT_GPIO", 72, minimum=0)
+KEY_STOP_GPIO = env_int("KEY_STOP_GPIO", 74, minimum=0)
 
 CLASSES = [
     "home",
@@ -117,13 +126,19 @@ CLASS_TO_TEXT = {
 # 默认不弹出 OpenCV 窗口，因为你现在主要靠实体按键控制。
 # 如果你想显示摄像头窗口，可以这样运行：
 # SHOW_WINDOW=1 python assistant_with_voice.py
-SHOW_WINDOW = os.environ.get("SHOW_WINDOW", "0") == "1"
+SHOW_WINDOW = env_bool("SHOW_WINDOW", False)
 
 # 微信识别间隔，单位秒。数值越小识别越频繁，CPU 压力越大。
-WECHAT_INFER_INTERVAL = float(os.environ.get("WECHAT_INFER_INTERVAL", "0.8"))
+WECHAT_INFER_INTERVAL = env_float("WECHAT_INFER_INTERVAL", 0.8, minimum=0.05)
 
 # 置信度阈值，太低时不播报。
-WECHAT_CONF_THRESHOLD = float(os.environ.get("WECHAT_CONF_THRESHOLD", "0.40"))
+WECHAT_CONF_THRESHOLD = env_float("WECHAT_CONF_THRESHOLD", 0.40, minimum=0.0, maximum=1.0)
+
+# 连续识别到相同页面若干次后再播报，减少镜头抖动造成的误提示。
+WECHAT_STABLE_FRAMES = env_int("WECHAT_STABLE_FRAMES", 2, minimum=1)
+WECHAT_REPEAT_SECONDS = env_float("WECHAT_REPEAT_SECONDS", 6.0, minimum=0.0)
+CAMERA_READ_FAILURE_LIMIT = env_int("CAMERA_READ_FAILURE_LIMIT", 30, minimum=1)
+MODE_STOP_TIMEOUT = env_float("MODE_STOP_TIMEOUT", 8.0, minimum=0.1)
 
 
 # =========================
@@ -405,7 +420,7 @@ def load_wechat_model():
 
     sess_options = ort.SessionOptions()
     sess_options.graph_optimization_level = ort.GraphOptimizationLevel.ORT_ENABLE_ALL
-    sess_options.intra_op_num_threads = 8
+    sess_options.intra_op_num_threads = ORT_INTRA_OP_THREADS
     sess_options.inter_op_num_threads = 1
 
     ort_session = ort.InferenceSession(
@@ -480,16 +495,6 @@ def preprocess_for_onnx(frame):
     return data
 
 
-def softmax(x):
-    x = np.asarray(x, dtype=np.float32)
-    x = x - np.max(x)
-    e = np.exp(x)
-    s = np.sum(e)
-    if s <= 0:
-        return e
-    return e / s
-
-
 def classify_wechat_frame(frame):
     load_wechat_model()
 
@@ -502,7 +507,7 @@ def classify_wechat_frame(frame):
         raise RuntimeError(f"模型输出数量小于类别数量: output={arr.size}, classes={len(CLASSES)}")
 
     arr = arr[:len(CLASSES)]
-    probs = softmax(arr)
+    probs = np.asarray(scores_to_probabilities(arr), dtype=np.float32)
 
     idx = int(np.argmax(probs))
     label = CLASSES[idx]
@@ -680,10 +685,10 @@ def capture_best_ocr_image(cap, stop_event=None):
     """
     OCR_CAPTURE_DIR.mkdir(parents=True, exist_ok=True)
 
-    width = int(os.environ.get("OCR_CAMERA_WIDTH", "1280"))
-    height = int(os.environ.get("OCR_CAMERA_HEIGHT", "720"))
-    warmup_seconds = float(os.environ.get("OCR_WARMUP_SECONDS", "2.0"))
-    sample_frames = int(os.environ.get("OCR_SAMPLE_FRAMES", "25"))
+    width = env_int("OCR_CAMERA_WIDTH", 1280, minimum=1)
+    height = env_int("OCR_CAMERA_HEIGHT", 720, minimum=1)
+    warmup_seconds = env_float("OCR_WARMUP_SECONDS", 2.0, minimum=0.0)
+    sample_frames = env_int("OCR_SAMPLE_FRAMES", 25, minimum=1)
 
     try:
         cap.set(cv2.CAP_PROP_FOURCC, cv2.VideoWriter_fourcc(*"MJPG"))
@@ -704,9 +709,9 @@ def capture_best_ocr_image(cap, stop_event=None):
 
     print(f"[OCR] 请保持画面稳定，预热 {warmup_seconds:.1f} 秒...")
     warmup_count = 0
-    deadline = time.time() + warmup_seconds
+    deadline = time.monotonic() + warmup_seconds
 
-    while time.time() < deadline:
+    while time.monotonic() < deadline:
         if stop_event is not None and stop_event.is_set():
             return None
 
@@ -768,7 +773,7 @@ def capture_best_ocr_image(cap, stop_event=None):
     print(f"[OCR] captured raw: {raw_path}")
     print(f"[OCR] captured processed: {processed_path}")
 
-    use_processed = os.environ.get("OCR_USE_PROCESSED", "1") == "1"
+    use_processed = env_bool("OCR_USE_PROCESSED", True)
 
     if use_processed and processed_ok:
         print(f"[OCR] captured: {processed_path}")
@@ -852,9 +857,13 @@ def run_wechat_mode(stop_event):
     load_wechat_model()
 
     cap = None
-    last_label = None
     last_infer_time = 0.0
-    last_speak_time = 0.0
+    consecutive_read_failures = 0
+    prediction_gate = PredictionGate(
+        confidence_threshold=WECHAT_CONF_THRESHOLD,
+        required_hits=WECHAT_STABLE_FRAMES,
+        repeat_seconds=WECHAT_REPEAT_SECONDS,
+    )
 
     try:
         speak_message("已进入微信引导模式。", wav_name="startup.wav", stop_event=stop_event)
@@ -865,11 +874,17 @@ def run_wechat_mode(stop_event):
             ret, frame = cap.read()
 
             if not ret or frame is None:
+                consecutive_read_failures += 1
                 print("[CAMERA] read failed")
+                if consecutive_read_failures >= CAMERA_READ_FAILURE_LIMIT:
+                    raise RuntimeError(
+                        f"摄像头连续读取失败 {consecutive_read_failures} 次，请检查连接后重新进入模式"
+                    )
                 time.sleep(0.1)
                 continue
 
-            now = time.time()
+            consecutive_read_failures = 0
+            now = time.monotonic()
 
             if now - last_infer_time >= WECHAT_INFER_INTERVAL:
                 last_infer_time = now
@@ -880,23 +895,12 @@ def run_wechat_mode(stop_event):
 
                     print(f"[WECHAT] {label}, conf={conf:.3f}, text={text}")
 
-                    if conf >= WECHAT_CONF_THRESHOLD:
-                        should_speak = False
-
-                        if label != last_label:
-                            should_speak = True
-                        elif now - last_speak_time > 6:
-                            should_speak = True
-
-                        if should_speak:
-                            wav_name = CLASS_TO_WAV.get(label)
-                            if wav_name:
-                                play_wav(wav_name, wait=False)
-                            else:
-                                speak_text_dynamic(text, stop_event=stop_event)
-
-                            last_label = label
-                            last_speak_time = now
+                    if prediction_gate.observe(label, conf, now):
+                        wav_name = CLASS_TO_WAV.get(label)
+                        if wav_name:
+                            play_wav(wav_name, wait=False)
+                        else:
+                            speak_text_dynamic(text, stop_event=stop_event)
 
                 except Exception as e:
                     print(f"[WECHAT] classify failed: {e}")
@@ -948,7 +952,7 @@ def stop_current_function(reason=""):
     stop_audio()
 
     if thread is not None and thread.is_alive() and thread is not threading.current_thread():
-        thread.join(timeout=8)
+        thread.join(timeout=MODE_STOP_TIMEOUT)
 
     with mode_lock:
         still_alive = thread is not None and thread.is_alive()
@@ -1091,6 +1095,7 @@ def cleanup():
 def main():
     print("======================================")
     print("[elder_ai] assistant_with_voice.py started")
+    print(f"[elder_ai] project dir: {BASE_DIR}")
     print("[elder_ai] 按键1=OCR，按键2=微信引导，按键4=结束当前功能")
     print("[elder_ai] 当前启动后进入待机状态")
     print("======================================")

@@ -2,7 +2,7 @@
 # -*- coding: utf-8 -*-
 
 """
-K1 / Muse Pi Pro 按键启动器
+Spacemit K1 MUSE Pi Pro 按键启动器
 
 默认模式：
     只监听按键 3 / GPIO73，用来启动 assistant_with_voice.py
@@ -18,6 +18,7 @@ K1 / Muse Pi Pro 按键启动器
     按键 4 -> GPIO74 -> 由 assistant_with_voice.py 负责结束当前功能
 """
 
+import argparse
 import os
 import sys
 import time
@@ -27,25 +28,27 @@ from pathlib import Path
 
 from gpiozero import Button, Device
 from gpiozero.pins.lgpio import LGPIOFactory
+from runtime_utils import env_int, resolve_project_dir
 
 
-PROJECT_DIR = Path("/home/hnu/elder_ai")
-ASSISTANT = PROJECT_DIR / "assistant_with_voice.py"
+PROJECT_DIR = resolve_project_dir(__file__)
+ASSISTANT = Path(os.environ.get("ASSISTANT_PATH", PROJECT_DIR / "assistant_with_voice.py"))
 VENV_PYTHON = PROJECT_DIR / "venv" / "bin" / "python"
 LOG_FILE = PROJECT_DIR / "assistant_with_voice.log"
+NETWORK_WAIT_SECONDS = env_int("NETWORK_WAIT_SECONDS", 0, minimum=0)
 
-KEY_OCR_GPIO = 71
-KEY_WECHAT_GPIO = 72
-KEY_PROJECT_GPIO = 73
-KEY_STOP_GPIO = 74
+KEY_OCR_GPIO = env_int("KEY_OCR_GPIO", 71, minimum=0)
+KEY_WECHAT_GPIO = env_int("KEY_WECHAT_GPIO", 72, minimum=0)
+KEY_PROJECT_GPIO = env_int("KEY_PROJECT_GPIO", 73, minimum=0)
+KEY_STOP_GPIO = env_int("KEY_STOP_GPIO", 74, minimum=0)
 
 
 def wait_network(timeout_seconds=60):
     print("[LAUNCHER] waiting for network...")
 
-    deadline = time.time() + timeout_seconds
+    deadline = time.monotonic() + timeout_seconds
 
-    while time.time() < deadline:
+    while time.monotonic() < deadline:
         try:
             sock = socket.create_connection(("223.5.5.5", 53), timeout=2)
             sock.close()
@@ -103,17 +106,17 @@ def start_project():
     env = os.environ.copy()
     env["PYTHONUNBUFFERED"] = "1"
 
-    log_f = open(LOG_FILE, "a", buffering=1)
-
-    subprocess.Popen(
-        [python_bin, str(ASSISTANT)],
-        cwd=str(PROJECT_DIR),
-        stdin=subprocess.DEVNULL,
-        stdout=log_f,
-        stderr=subprocess.STDOUT,
-        start_new_session=True,
-        env=env,
-    )
+    LOG_FILE.parent.mkdir(parents=True, exist_ok=True)
+    with LOG_FILE.open("a", buffering=1, encoding="utf-8") as log_f:
+        subprocess.Popen(
+            [python_bin, str(ASSISTANT)],
+            cwd=str(PROJECT_DIR),
+            stdin=subprocess.DEVNULL,
+            stdout=log_f,
+            stderr=subprocess.STDOUT,
+            start_new_session=True,
+            env=env,
+        )
 
     time.sleep(0.5)
 
@@ -154,7 +157,8 @@ def run_test_mode():
 
 
 def run_launcher_mode():
-    wait_network()
+    if NETWORK_WAIT_SECONDS:
+        wait_network(NETWORK_WAIT_SECONDS)
 
     print("[LAUNCHER] press key 3 to start project")
     print("[LAUNCHER] 注意：启动器默认只监听按键3，按键1/2/4由 assistant_with_voice.py 监听")
@@ -177,7 +181,12 @@ def run_launcher_mode():
 
 
 def main():
-    if len(sys.argv) >= 2 and sys.argv[1] == "--test":
+    parser = argparse.ArgumentParser(description="Spacemit K1 MUSE Pi Pro 项目按键启动器")
+    parser.add_argument("--test", action="store_true", help="监听并打印全部四个按键")
+    args = parser.parse_args()
+
+    print(f"[LAUNCHER] project dir: {PROJECT_DIR}")
+    if args.test:
         run_test_mode()
     else:
         run_launcher_mode()

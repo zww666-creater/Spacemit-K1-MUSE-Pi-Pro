@@ -1,0 +1,8 @@
+# K1 的 RISC-V 系统可能需要使用板卡厂商提供的 OpenCV / ONNX Runtime wheel。
+numpy>=1.24
+opencv-python>=4.8
+onnxruntime>=1.16
+gpiozero>=2.0
+lgpio>=0.2.2.0; platform_system == "Linux"
+Pillow>=10.0
+pytesseract>=0.3.10

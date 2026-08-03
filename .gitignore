@@ -1,0 +1,17 @@
+__pycache__/
+*.py[cod]
+.pytest_cache/
+.ruff_cache/
+.venv/
+venv/
+
+*.log
+captures/
+ocr_captures/
+tts_cache/
+models/
+
+.env
+elder-ai.env
+.DS_Store
+Thumbs.db
